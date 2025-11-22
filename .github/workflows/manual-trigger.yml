@@ -1,0 +1,71 @@
+name: Manual VM Scaling
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - scale_down
+          - scale_up
+      project_id:
+        description: 'GCP Project ID (optional, will use terraform.tfvars if not provided)'
+        required: false
+        type: string
+
+jobs:
+  trigger-scaling:
+    name: 'Trigger VM Scaling'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Get Project ID from tfvars
+        id: get-project
+        run: |
+          if [ -z "${{ github.event.inputs.project_id }}" ]; then
+            PROJECT_ID=$(grep 'project_id' terraform/terraform.tfvars | cut -d'"' -f2)
+          else
+            PROJECT_ID="${{ github.event.inputs.project_id }}"
+          fi
+          echo "project_id=${PROJECT_ID}" >> $GITHUB_OUTPUT
+          echo "Using Project ID: ${PROJECT_ID}"
+
+      - name: Publish message to Pub/Sub
+        run: |
+          TOPIC="vm-${{ github.event.inputs.action }}"
+          MESSAGE='{"action":"${{ github.event.inputs.action }}","project_id":"${{ steps.get-project.outputs.project_id }}"}'
+          
+          echo "Publishing to topic: ${TOPIC}"
+          echo "Message: ${MESSAGE}"
+          
+          gcloud pubsub topics publish ${TOPIC} \
+            --project="${{ steps.get-project.outputs.project_id }}" \
+            --message="${MESSAGE}"
+
+      - name: Check function logs
+        run: |
+          echo "Waiting for function execution..."
+          sleep 10
+          
+          echo "Recent function logs:"
+          gcloud functions logs read vm-scheduler \
+            --project="${{ steps.get-project.outputs.project_id }}" \
+            --region=us-central1 \
+            --limit=20

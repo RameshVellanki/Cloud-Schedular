@@ -1,0 +1,250 @@
+# Enable required APIs
+resource "google_project_service" "required_apis" {
+  for_each = toset([
+    "cloudfunctions.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "pubsub.googleapis.com",
+    "compute.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "run.googleapis.com",
+    "eventarc.googleapis.com",
+    "logging.googleapis.com"
+  ])
+  
+  service            = each.key
+  disable_on_destroy = false
+}
+
+# Create Pub/Sub topics for scale up and scale down
+resource "google_pubsub_topic" "scale_down" {
+  name = "vm-scale-down"
+  
+  depends_on = [google_project_service.required_apis]
+}
+
+resource "google_pubsub_topic" "scale_up" {
+  name = "vm-scale-up"
+  
+  depends_on = [google_project_service.required_apis]
+}
+
+# Service account for Cloud Function
+resource "google_service_account" "vm_scheduler" {
+  account_id   = "vm-scheduler-sa"
+  display_name = "VM Scheduler Service Account"
+  description  = "Service account for VM scheduler Cloud Function"
+}
+
+# Grant Compute Instance Admin role to service account
+resource "google_project_iam_member" "compute_admin" {
+  project = var.project_id
+  role    = "roles/compute.instanceAdmin.v1"
+  member  = "serviceAccount:${google_service_account.vm_scheduler.email}"
+}
+
+# Grant Compute Viewer role to service account
+resource "google_project_iam_member" "compute_viewer" {
+  project = var.project_id
+  role    = "roles/compute.viewer"
+  member  = "serviceAccount:${google_service_account.vm_scheduler.email}"
+}
+
+# Create GCS bucket for Cloud Function source code
+resource "google_storage_bucket" "function_source" {
+  name          = "${var.project_id}-vm-scheduler-source"
+  location      = var.region
+  force_destroy = true
+  
+  uniform_bucket_level_access = true
+  
+  depends_on = [google_project_service.required_apis]
+}
+
+# Archive the function source code
+data "archive_file" "function_source" {
+  type        = "zip"
+  output_path = "${path.module}/../function-source.zip"
+  source_dir  = "${path.module}/.."
+  
+  excludes = [
+    "terraform",
+    ".git",
+    ".gitignore",
+    "README.md",
+    "function-source.zip",
+    ".gcloudignore",
+    "config.yaml",
+    "Dockerfile",
+    ".dockerignore",
+    "cloudbuild.yaml"
+  ]
+}
+
+# Upload function source to GCS
+resource "google_storage_bucket_object" "function_source" {
+  name   = "vm-scheduler-${data.archive_file.function_source.output_md5}.zip"
+  bucket = google_storage_bucket.function_source.name
+  source = data.archive_file.function_source.output_path
+}
+
+# Cloud Function for VM scheduling
+resource "google_cloudfunctions2_function" "vm_scheduler" {
+  name        = "vm-scheduler"
+  location    = var.region
+  description = "Automated VM scheduler for scale up/down"
+  
+  build_config {
+    runtime     = "python311"
+    entry_point = "vm_scheduler"
+    
+    source {
+      storage_source {
+        bucket = google_storage_bucket.function_source.name
+        object = google_storage_bucket_object.function_source.name
+      }
+    }
+  }
+  
+  service_config {
+    max_instance_count    = 1
+    min_instance_count    = 0
+    available_memory      = "256Mi"
+    timeout_seconds       = var.function_timeout
+    service_account_email = google_service_account.vm_scheduler.email
+    
+    environment_variables = {
+      GCP_PROJECT        = var.project_id
+      VM_LABELS          = var.vm_labels
+      VM_ZONES           = var.vm_zones
+      SCALE_DOWN_ACTION  = var.scale_down_action
+      SCALE_UP_ACTION    = var.scale_up_action
+    }
+  }
+  
+  event_trigger {
+    trigger_region        = var.region
+    event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic          = google_pubsub_topic.scale_down.id
+    retry_policy          = "RETRY_POLICY_RETRY"
+    service_account_email = google_service_account.vm_scheduler.email
+  }
+  
+  depends_on = [
+    google_project_service.required_apis,
+    google_project_iam_member.compute_admin,
+    google_project_iam_member.compute_viewer
+  ]
+}
+
+# Second function instance for scale up (shares same code, different trigger)
+resource "google_cloudfunctions2_function" "vm_scheduler_scale_up" {
+  name        = "vm-scheduler-scale-up"
+  location    = var.region
+  description = "Automated VM scheduler for scale up"
+  
+  build_config {
+    runtime     = "python311"
+    entry_point = "vm_scheduler"
+    
+    source {
+      storage_source {
+        bucket = google_storage_bucket.function_source.name
+        object = google_storage_bucket_object.function_source.name
+      }
+    }
+  }
+  
+  service_config {
+    max_instance_count    = 1
+    min_instance_count    = 0
+    available_memory      = "256Mi"
+    timeout_seconds       = var.function_timeout
+    service_account_email = google_service_account.vm_scheduler.email
+    
+    environment_variables = {
+      GCP_PROJECT        = var.project_id
+      VM_LABELS          = var.vm_labels
+      VM_ZONES           = var.vm_zones
+      SCALE_DOWN_ACTION  = var.scale_down_action
+      SCALE_UP_ACTION    = var.scale_up_action
+    }
+  }
+  
+  event_trigger {
+    trigger_region        = var.region
+    event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic          = google_pubsub_topic.scale_up.id
+    retry_policy          = "RETRY_POLICY_RETRY"
+    service_account_email = google_service_account.vm_scheduler.email
+  }
+  
+  depends_on = [
+    google_project_service.required_apis,
+    google_project_iam_member.compute_admin,
+    google_project_iam_member.compute_viewer
+  ]
+}
+
+# Service account for Cloud Scheduler
+resource "google_service_account" "scheduler" {
+  account_id   = "vm-scheduler-invoker"
+  display_name = "VM Scheduler Invoker"
+  description  = "Service account for Cloud Scheduler to publish to Pub/Sub"
+}
+
+# Grant Pub/Sub Publisher role to scheduler service account
+resource "google_pubsub_topic_iam_member" "scale_down_publisher" {
+  topic  = google_pubsub_topic.scale_down.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${google_service_account.scheduler.email}"
+}
+
+resource "google_pubsub_topic_iam_member" "scale_up_publisher" {
+  topic  = google_pubsub_topic.scale_up.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${google_service_account.scheduler.email}"
+}
+
+# Cloud Scheduler job for scaling down VMs
+resource "google_cloud_scheduler_job" "scale_down" {
+  name             = "vm-scale-down-weekend"
+  description      = "Scale down VMs for the weekend"
+  schedule         = var.scale_down_schedule
+  time_zone        = var.timezone
+  attempt_deadline = "320s"
+  
+  pubsub_target {
+    topic_name = google_pubsub_topic.scale_down.id
+    data       = base64encode(jsonencode({
+      action     = "scale_down"
+      project_id = var.project_id
+    }))
+  }
+  
+  depends_on = [
+    google_project_service.required_apis,
+    google_pubsub_topic_iam_member.scale_down_publisher
+  ]
+}
+
+# Cloud Scheduler job for scaling up VMs
+resource "google_cloud_scheduler_job" "scale_up" {
+  name             = "vm-scale-up-weekday"
+  description      = "Scale up VMs for the weekday"
+  schedule         = var.scale_up_schedule
+  time_zone        = var.timezone
+  attempt_deadline = "320s"
+  
+  pubsub_target {
+    topic_name = google_pubsub_topic.scale_up.id
+    data       = base64encode(jsonencode({
+      action     = "scale_up"
+      project_id = var.project_id
+    }))
+  }
+  
+  depends_on = [
+    google_project_service.required_apis,
+    google_pubsub_topic_iam_member.scale_up_publisher
+  ]
+}
