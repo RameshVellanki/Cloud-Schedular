@@ -1,4 +1,4 @@
-name: Deploy VM Scheduler
+name: Deploy MIG Scheduler
 
 on:
   push:

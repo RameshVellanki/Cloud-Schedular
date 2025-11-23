@@ -1,4 +1,4 @@
-name: Manual VM Scaling
+name: Manual MIG Scaling
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
 
 jobs:
   trigger-scaling:
-    name: 'Trigger VM Scaling'
+    name: 'Trigger MIG Scaling'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -47,7 +47,7 @@ jobs:
 
       - name: Publish message to Pub/Sub
         run: |
-          TOPIC="vm-${{ github.event.inputs.action }}"
+          TOPIC="mig-${{ github.event.inputs.action }}"
           MESSAGE='{"action":"${{ github.event.inputs.action }}","project_id":"${{ steps.get-project.outputs.project_id }}"}'
           
           echo "Publishing to topic: ${TOPIC}"
@@ -63,7 +63,8 @@ jobs:
           sleep 10
           
           echo "Recent function logs:"
-          gcloud functions logs read vm-scheduler \
+          gcloud functions logs read mig-scheduler \
             --project="${{ steps.get-project.outputs.project_id }}" \
             --region=us-central1 \
-            --limit=20
+            --limit=20 \
+            --gen2

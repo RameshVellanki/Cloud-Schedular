@@ -1,601 +1,266 @@
-# Google Cloud VM Scheduler
+# Google Cloud MIG Scheduler
 
-Automated solution for scaling up and down virtual machines in Google Cloud Platform during weekends for cloud cost optimization. This project uses **Cloud Functions (2nd gen)**, **Cloud Scheduler**, **Pub/Sub**, and **Terraform** for infrastructure as code.
+Automated solution for scaling Managed Instance Groups (MIGs) in Google Cloud Platform during weekends for cloud cost optimization. This project uses **Cloud Functions (2nd gen)**, **Cloud Scheduler**, **Pub/Sub**, and **Terraform** for infrastructure as code.
 
-## 📊 Architecture Diagram
+## 📊 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         GitHub Actions (CI/CD)                      │
-│                                                                     │
-│  ┌──────────────┐      ┌──────────────┐      ┌─────────────────┐ │
-│  │   Validate   │ -->  │  Terraform   │ -->  │  Deploy to GCP  │ │
-│  │   (PR/Push)  │      │     Plan     │      │   (Push main)   │ │
-│  └──────────────┘      └──────────────┘      └─────────────────┘ │
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Google Cloud Platform                            │
-│                                                                     │
-│  ┌────────────────────────────────────────────────────────────┐   │
-│  │                   Terraform State (GCS)                    │   │
-│  │            Bucket: gcp-tftbk (existing)                    │   │
-│  │        Prefix: cloud-schedular/terraform/state             │   │
-│  └────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│  ┌──────────────────────┐        ┌──────────────────────┐         │
-│  │  Cloud Scheduler     │        │  Cloud Scheduler     │         │
-│  │  (Scale Down)        │        │  (Scale Up)          │         │
-│  │  Cron: Fri 6 PM      │        │  Cron: Mon 8 AM      │         │
-│  └──────────┬───────────┘        └──────────┬───────────┘         │
-│             │                               │                      │
-│             ▼                               ▼                      │
-│  ┌──────────────────────┐        ┌──────────────────────┐         │
-│  │   Pub/Sub Topic      │        │   Pub/Sub Topic      │         │
-│  │   vm-scale-down      │        │   vm-scale-up        │         │
-│  └──────────┬───────────┘        └──────────┬───────────┘         │
-│             │                               │                      │
-│             └───────────────┬───────────────┘                      │
-│                             ▼                                      │
-│              ┌──────────────────────────────┐                     │
-│              │   Cloud Function (Gen 2)     │                     │
-│              │      vm-scheduler            │                     │
-│              │   • Python 3.11              │                     │
-│              │   • Eventarc Trigger         │                     │
-│              │   • Service Account Auth     │                     │
-│              └──────────────┬───────────────┘                     │
-│                             │                                      │
-│                             ▼                                      │
-│              ┌──────────────────────────────┐                     │
-│              │   Compute Engine API         │                     │
-│              │   • List VMs by labels       │                     │
-│              │   • Stop/Start instances     │                     │
-│              │   • Suspend/Resume instances │                     │
-│              └──────────────┬───────────────┘                     │
-│                             │                                      │
-│                             ▼                                      │
-│        ┌────────────────────────────────────────┐                │
-│        │          Virtual Machines               │                │
-│        │  (Filtered by labels)                   │                │
-│        │                                         │                │
-│        │  ┌──────┐  ┌──────┐  ┌──────┐         │                │
-│        │  │ VM 1 │  │ VM 2 │  │ VM 3 │  ...    │                │
-│        │  │ dev  │  │ dev  │  │ test │         │                │
-│        │  └──────┘  └──────┘  └──────┘         │                │
-│        │  Label: auto-schedule=true             │                │
-│        └────────────────────────────────────────┘                │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    GitHub Actions (CI/CD)                       │
+│  ┌─────────────┐    ┌──────────────┐    ┌─────────────────┐   │
+│  │  Validate   │ -> │  Terraform   │ -> │  Deploy to GCP  │   │
+│  │  (PR/Push)  │    │     Plan     │    │   (Push main)   │   │
+│  └─────────────┘    └──────────────┘    └─────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Google Cloud Platform                          │
+│                                                                 │
+│  ┌──────────────────┐        ┌──────────────────┐             │
+│  │ Cloud Scheduler  │        │ Cloud Scheduler  │             │
+│  │  (Scale Down)    │        │   (Scale Up)     │             │
+│  │  Fri 6 PM EST    │        │  Mon 8 AM EST    │             │
+│  └────────┬─────────┘        └────────┬─────────┘             │
+│           │                           │                        │
+│           ▼                           ▼                        │
+│  ┌──────────────────┐        ┌──────────────────┐             │
+│  │   Pub/Sub Topic  │        │   Pub/Sub Topic  │             │
+│  │ mig-scale-down   │        │  mig-scale-up    │             │
+│  └────────┬─────────┘        └────────┬─────────┘             │
+│           │                           │                        │
+│           └───────────┬───────────────┘                        │
+│                       ▼                                        │
+│       ┌───────────────────────────────┐                       │
+│       │  Cloud Function (Gen 2)       │                       │
+│       │     mig-scheduler             │                       │
+│       │   • Python 3.11               │                       │
+│       │   • Eventarc Trigger          │                       │
+│       └──────────────┬────────────────┘                       │
+│                      │                                         │
+│                      ▼                                         │
+│       ┌───────────────────────────────┐                       │
+│       │    Compute Engine API         │                       │
+│       │  • Resize MIG to 0 (down)     │                       │
+│       │  • Resize MIG to N (up)       │                       │
+│       └──────────────┬────────────────┘                       │
+│                      │                                         │
+│                      ▼                                         │
+│       ┌───────────────────────────────┐                       │
+│       │  Managed Instance Group       │                       │
+│       │    oracle-linux-mig           │                       │
+│       │    Zone: us-central1-a        │                       │
+│       │    Size: 0 ↔ 5                │                       │
+│       └───────────────────────────────┘                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## 🎯 Key Features
+## 🎯 Features
 
-- ⏰ **Automated Scheduling**: Set custom cron schedules for scale up/down
-- 🏷️ **Label-based Targeting**: Manage VMs using GCP labels
-- 🔒 **Secure**: Workload Identity Federation (no service account keys)
-- 📦 **Infrastructure as Code**: Complete Terraform configuration
+- ⏰ **Automated Scheduling**: Custom cron schedules for scaling operations
+- 🔧 **Zonal MIG Support**: Works with zonal Managed Instance Groups
+- 🔒 **Secure**: Service account authentication with least-privilege IAM
+- 📦 **Infrastructure as Code**: Complete Terraform configuration with automated IAM
 - 🚀 **CI/CD Ready**: GitHub Actions for automated deployment
-- 💰 **Cost Optimization**: Save ~29% on compute costs
-- 🔄 **State Management**: Remote state with versioning and locking
-- 🧪 **Easy Testing**: Manual trigger via GitHub Actions UI
+- 💰 **Cost Optimization**: Save costs by scaling down during off-hours
+- 🔄 **State Management**: Remote state in existing GCS bucket
+- 🧪 **Easy Testing**: Manual trigger via Cloud Scheduler or GitHub Actions
 
 ## 📋 Prerequisites
 
 - Google Cloud Platform account with billing enabled
-- GitHub repository (for CI/CD automation)
-- [Google Cloud SDK (gcloud)](https://cloud.google.com/sdk/docs/install) - for local development
-- [Terraform](https://www.terraform.io/downloads) >= 1.0 - for manual deployment (optional)
+- Existing GCS bucket for Terraform state
+- GitHub repository with GCP service account key secret
+- Terraform >= 1.6
+- Python 3.11 (for local testing)
 
-## 🚀 Complete Setup Guide
+## 🚀 Quick Start
 
-### Step 1: Configure Project Settings
+### 1. Configure Variables
 
-Edit `terraform/terraform.tfvars` with your configuration:
+Edit `terraform/terraform.tfvars`:
 
 ```hcl
 project_id = "your-gcp-project-id"
 region     = "us-central1"
 
-# VM labels to identify which VMs to manage
-vm_labels = "auto-schedule:true,environment:dev"
+# MIG configuration
+mig_name = "your-mig-name"
+mig_zone = "us-central1-a"  # Zone where your MIG is located
 
-# Zones to check for VMs
-vm_zones = "us-central1-a,us-central1-b,us-east1-b"
+# Target size when scaling up
+mig_scale_up_size = 5
 
-# Scale actions: STOP/START or SUSPEND/RESUME
-scale_down_action = "STOP"
-scale_up_action   = "START"
-
-# Cron schedules (Cloud Scheduler format)
+# Schedules (cron format)
 scale_down_schedule = "0 18 * * 5"  # Friday 6 PM
 scale_up_schedule   = "0 8 * * 1"   # Monday 8 AM
-
-timezone = "America/New_York"
+timezone            = "America/New_York"
 ```
 
-### Step 2: Label Your VMs
+### 2. Configure Backend
 
-Tag VMs you want to manage with appropriate labels:
+Edit `terraform/backend.tf` with your existing GCS bucket:
 
-**Option 1 - gcloud CLI**:
-```bash
-gcloud compute instances add-labels INSTANCE_NAME \
-  --labels=auto-schedule=true,environment=dev \
-  --zone=us-central1-a
-```
-
-**Option 2 - Console**:
-1. Go to Compute Engine → VM instances
-2. Click on instance → Edit
-3. Add labels: `auto-schedule: true`, `environment: dev`
-4. Save
-
-**Option 3 - Terraform**:
 ```hcl
-resource "google_compute_instance" "example" {
-  name         = "my-vm"
-  machine_type = "n1-standard-1"
-  zone         = "us-central1-a"
-  
-  labels = {
-    auto-schedule = "true"
-    environment   = "dev"
+terraform {
+  backend "gcs" {
+    bucket = "your-existing-terraform-state-bucket"
+    prefix = "cloud-schedular/terraform/state"
   }
-  # ... other configuration
 }
 ```
 
-### Step 3: Set Up GitHub Actions (Recommended)
+### 3. Set Up GitHub Secrets
 
-#### 3.1 Create Service Account Key
+Add `GCP_SA_KEY` secret to your GitHub repository:
+- Go to Settings → Secrets and variables → Actions
+- Add new repository secret: `GCP_SA_KEY`
+- Paste your service account JSON key
 
-If you don't already have a service account key for your GCP Terraform integration SA:
+### 4. Deploy
 
-```bash
-export PROJECT_ID="your-gcp-project-id"
-export SA_NAME="your-terraform-sa-name"
-
-# Create key and download as JSON
-gcloud iam service-accounts keys create terraform-sa-key.json \
-  --iam-account=${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com
-```
-
-#### 3.2 Configure GitHub Secret
-
-1. Go to your GitHub repository
-2. Navigate to: **Settings** → **Secrets and variables** → **Actions**
-3. Click **New repository secret**
-4. Add the secret:
-
-| Secret Name | Value |
-|-------------|-------|
-| `GCP_SA_KEY` | Entire contents of the service account JSON key file |
-
-**To get the JSON content:**
-```bash
-# Copy the entire output
-cat terraform-sa-key.json
-
-# Or on Windows
-Get-Content terraform-sa-key.json
-```
-
-**Important**: Delete the local key file after adding to GitHub:
-```bash
-rm terraform-sa-key.json  # Linux/Mac
-Remove-Item terraform-sa-key.json  # Windows
-```
-
-#### 3.3 Verify Service Account Permissions
-
-Ensure your service account has the required roles:
-```bash
-# Check current roles
-gcloud projects get-iam-policy ${PROJECT_ID} \
-  --flatten="bindings[].members" \
-  --filter="bindings.members:serviceAccount:${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-# Add required roles if needed
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member="serviceAccount:${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/editor"
-```
-
-#### 3.4 Deploy
+Push to main branch - GitHub Actions will automatically deploy:
 
 ```bash
 git add .
-git commit -m "Deploy VM Scheduler"
+git commit -m "Initial setup"
 git push origin main
 ```
 
-The GitHub Actions workflow will automatically:
-- Create the Terraform state bucket
-- Initialize Terraform
-- Plan and apply the infrastructure
-- Deploy Cloud Functions and schedulers
+## 🔧 Manual Deployment
 
-### Alternative: Manual Deployment
+For local deployment:
 
 ```bash
 cd terraform
-
-# Authenticate
-gcloud auth application-default login
-
-# Initialize and deploy
 terraform init
 terraform plan
 terraform apply
 ```
 
-### Step 4: Verify Deployment
+## 📊 Testing
+
+### Manual Trigger via Cloud Scheduler
 
 ```bash
-# Check deployed resources
-gcloud functions list --project=${PROJECT_ID}
-gcloud scheduler jobs list --project=${PROJECT_ID}
-gcloud pubsub topics list --project=${PROJECT_ID}
+# Scale down
+gcloud scheduler jobs run mig-scale-down-weekend --location=us-central1
 
-# View function logs
-gcloud functions logs read vm-scheduler \
-  --project=${PROJECT_ID} \
-  --region=us-central1 \
-  --limit=50
+# Scale up
+gcloud scheduler jobs run mig-scale-up-weekday --location=us-central1
 ```
 
-## 🧪 Testing
+### Manual Trigger via GitHub Actions
 
-### Option 1: Manual Trigger via GitHub Actions
+1. Go to Actions tab in GitHub
+2. Select "Manual MIG Scaling" workflow
+3. Click "Run workflow"
+4. Choose action (scale_down or scale_up)
 
-1. Go to your repository on GitHub
-2. Click **Actions** tab
-3. Select **Manual VM Scaling** workflow
-4. Click **Run workflow**
-5. Choose action (`scale_down` or `scale_up`)
-6. Click **Run workflow**
-
-The workflow will publish a message to Pub/Sub and show the function logs.
-
-### Option 2: Manual Testing via gcloud CLI
-
-Test the scale-down operation:
-```bash
-gcloud pubsub topics publish vm-scale-down \
-  --project="YOUR_PROJECT_ID" \
-  --message='{"action":"scale_down","project_id":"YOUR_PROJECT_ID"}'
-```
-
-Test the scale-up operation:
-```bash
-gcloud pubsub topics publish vm-scale-up \
-  --project="YOUR_PROJECT_ID" \
-  --message='{"action":"scale_up","project_id":"YOUR_PROJECT_ID"}'
-```
-
-### Check Function Logs
+### Check Logs
 
 ```bash
-gcloud functions logs read vm-scheduler \
-  --project=YOUR_PROJECT_ID \
-  --region=us-central1 \
-  --limit=50
+gcloud functions logs read mig-scheduler --region=us-central1 --limit=50 --gen2
 ```
 
-## 📅 Schedule Configuration
-
-The schedules use standard cron format: `minute hour day month day_of_week`
-
-### Common Schedule Examples
-
-```hcl
-# Friday 6 PM
-scale_down_schedule = "0 18 * * 5"
-
-# Monday 8 AM
-scale_up_schedule = "0 8 * * 1"
-
-# Every day at 7 PM
-scale_down_schedule = "0 19 * * *"
-
-# Every day at 7 AM
-scale_up_schedule = "0 7 * * *"
-
-# Saturday 12 AM (midnight Friday)
-scale_down_schedule = "0 0 * * 6"
-
-# Multiple times a day (8 AM and 6 PM)
-# Create separate scheduler jobs
-```
-
-### Timezone
-
-Set the timezone in `terraform.tfvars`:
-```hcl
-timezone = "America/New_York"      # Eastern Time
-timezone = "America/Los_Angeles"   # Pacific Time
-timezone = "Europe/London"         # UK
-timezone = "Asia/Tokyo"            # Japan
-```
-
-[Full timezone list](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
-
-## ⚙️ Configuration Options
-
-### VM Selection
-
-**Option 1: By Labels** (Recommended)
-```hcl
-vm_labels = "auto-schedule:true,environment:dev"
-vm_zones  = "us-central1-a,us-central1-b"
-```
-
-**Option 2: Modify for specific instances**
-Edit `main.py` to hardcode specific instances if needed.
-
-### Scale Actions
-
-**STOP vs SUSPEND**:
-- **STOP**: Completely stops the VM (no memory preserved, slower restart)
-- **SUSPEND**: Suspends to disk (memory preserved, faster restart, charges for disk)
-
-```hcl
-scale_down_action = "STOP"     # or "SUSPEND"
-scale_up_action   = "START"    # or "RESUME"
-```
-
-## 💰 Cost Optimization
-
-### Estimated Savings
-
-For a VM running 24/7 vs weekends-off:
-- **Normal operation**: 168 hours/week
-- **With weekend shutdown**: 120 hours/week
-- **Savings**: ~29% on compute costs
-
-Example:
-- n1-standard-4 VM: $140/month → $99/month = **$41/month saved per VM**
-
-### Service Costs
-
-- **Cloud Functions**: Free tier covers most usage (~2 invocations/week)
-- **Cloud Scheduler**: Free tier covers up to 3 jobs
-- **Pub/Sub**: First 10 GB free
-- **Total additional cost**: ~$0-1/month
-
-## 🔒 Security & Permissions
-
-The Terraform configuration automatically creates:
-
-1. **Service Account**: `vm-scheduler-sa`
-   - `roles/compute.instanceAdmin.v1`: Stop/start VMs
-   - `roles/compute.viewer`: List VMs
-
-2. **Scheduler Service Account**: `vm-scheduler-invoker`
-   - `roles/pubsub.publisher`: Publish to Pub/Sub topics
-
-### Least Privilege Principle
-
-The service accounts have minimal required permissions. Review and adjust based on your security requirements.
-
-## 🛠️ Troubleshooting
-
-### Issue: VMs not stopping/starting
-
-**Check**:
-1. VM labels match configuration
-2. VMs are in specified zones
-3. Function has correct permissions
-4. Check function logs for errors
+### Check MIG Status
 
 ```bash
-gcloud functions logs read vm-scheduler \
-  --project=YOUR_PROJECT_ID \
-  --region=us-central1
+gcloud compute instance-groups managed describe your-mig-name --zone=us-central1-a
 ```
-
-### Issue: Scheduler not triggering
-
-**Check**:
-1. Scheduler jobs are enabled
-2. Timezone is correct
-3. Cron schedule is valid
-
-```bash
-gcloud scheduler jobs list --project=YOUR_PROJECT_ID
-gcloud scheduler jobs describe vm-scale-down-weekend --project=YOUR_PROJECT_ID
-```
-
-### Issue: Permission denied errors
-
-**Fix**:
-```bash
-# Ensure APIs are enabled
-gcloud services enable cloudfunctions.googleapis.com
-gcloud services enable cloudscheduler.googleapis.com
-gcloud services enable compute.googleapis.com
-
-# Re-apply Terraform to fix IAM
-cd terraform
-terraform apply
-```
-
-## 📊 Monitoring
-
-### View Logs
-
-```bash
-# Function logs
-gcloud functions logs read vm-scheduler --limit=50
-
-# Scheduler logs
-gcloud scheduler jobs describe vm-scale-down-weekend
-
-# List recent executions
-gcloud scheduler jobs executions list vm-scale-down-weekend
-```
-
-### Set Up Alerts
-
-Create alerts in Cloud Monitoring for:
-- Function execution failures
-- Scheduler job failures
-- VM state changes
-
-## 🔄 Updates and Maintenance
-
-### Update Configuration
-
-1. Modify `terraform.tfvars`
-2. Run `terraform apply`
-
-### Update Function Code
-
-1. Modify `main.py`
-2. Run `terraform apply` (Terraform will detect changes and redeploy)
-
-### Destroy Resources
-
-```bash
-cd terraform
-terraform destroy
-```
-
-## 🔧 Technical Details
-
-### Terraform Backend
-
-**State Storage**:
-- **Bucket**: `gcp-tftbk` (existing bucket)
-- **Prefix**: `cloud-schedular/terraform/state`
-- **Versioning**: Managed on existing bucket
-- **Locking**: Automatic via GCS
-- **Access**: IAM-controlled
-
-**State Commands**:
-```bash
-# View current state
-terraform state list
-
-# Show specific resource
-terraform state show google_cloudfunctions2_function.vm_scheduler
-
-# Pull state for inspection
-terraform state pull > state.json
-
-# Force unlock if needed
-terraform force-unlock LOCK_ID
-```
-
-### Cloud Function Specifications
-
-| Property | Value |
-|----------|-------|
-| **Runtime** | Python 3.11 |
-| **Trigger** | Eventarc (Pub/Sub) |
-| **Memory** | 256Mi |
-| **Timeout** | 300 seconds |
-| **Concurrency** | 1 instance max |
-| **Auth** | Service Account |
-
-**Environment Variables**:
-```bash
-GCP_PROJECT=your-project-id          # Project ID
-VM_LABELS=auto-schedule:true         # Labels to filter VMs
-VM_ZONES=us-central1-a,us-central1-b # Zones to check
-SCALE_DOWN_ACTION=STOP               # STOP or SUSPEND
-SCALE_UP_ACTION=START                # START or RESUME
-```
-
-### IAM & Security Model
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Security Architecture                    │
-└─────────────────────────────────────────────────────────────┘
-
-GitHub Actions (CI/CD)
-  │
-  └─> Service Account Key (GCP_SA_KEY secret)
-        │
-        └─> terraform-sa@PROJECT.iam.gserviceaccount.com
-              │
-              └─> roles/editor (Deploy Infrastructure)
-
-
-Cloud Scheduler
-  │
-  └─> vm-scheduler-invoker@PROJECT.iam.gserviceaccount.com
-        │
-        └─> roles/pubsub.publisher (Publish Messages)
-
-
-Cloud Function
-  │
-  └─> vm-scheduler-sa@PROJECT.iam.gserviceaccount.com
-        │
-        ├─> roles/compute.instanceAdmin.v1 (Start/Stop VMs)
-        └─> roles/compute.viewer (List VMs)
-```
-
-**Security Best Practices**:
-- ✅ Service account key stored as GitHub secret
-- ✅ Least privilege IAM roles
-- ✅ Versioned state with audit logs
-- ✅ Automated deployments from GitHub only
-- ✅ No secrets in code or version control
-- ⚠️ Rotate service account keys regularly
 
 ## 📁 Project Structure
 
 ```
-Cloud-Schedular/
-├── main.py                          # Cloud Function code (Python 3.11)
+.
+├── main.py                          # Cloud Function code
 ├── requirements.txt                 # Python dependencies
-├── .gcloudignore                    # Files excluded from function deployment
-├── .gitignore                       # Git ignore patterns
-├── README.md                        # Complete documentation (this file)
 ├── .github/
 │   └── workflows/
-│       ├── deploy.yml               # CI/CD: Deploy on push to main
-│       ├── validate.yml             # CI/CD: Validate on pull requests
-│       └── manual-trigger.yml       # Manual VM scaling trigger
+│       ├── deploy.yml              # Main deployment workflow
+│       ├── validate.yml            # PR validation
+│       └── manual-trigger.yml      # Manual scaling trigger
 └── terraform/
-    ├── main.tf                      # Provider configuration
-    ├── backend.tf                   # GCS backend for state (uses gcp-tftbk)
-    ├── variables.tf                 # Input variables with validation
-    ├── resources.tf                 # All GCP resources
-    ├── outputs.tf                   # Deployment outputs
-    └── terraform.tfvars             # Your configuration (committed)
+    ├── backend.tf                  # GCS backend configuration
+    ├── main.tf                     # Provider configuration
+    ├── variables.tf                # Variable definitions
+    ├── terraform.tfvars            # Variable values
+    ├── resources.tf                # All GCP resources & IAM
+    └── outputs.tf                  # Output values
 ```
 
-## 🤝 Contributing
+## 🔐 IAM Permissions
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+All required permissions are automated via Terraform - no manual setup needed!
+
+### Automated Permissions Include:
+- Cloud Build service account permissions
+- Compute service account permissions
+- MIG scheduler service account permissions
+- Cloud Run invoker permissions
+- Storage bucket access
+- Service agent permissions
+
+## 🛠️ Customization
+
+### Change Schedule
+
+Edit schedules in `terraform/terraform.tfvars`:
+
+```hcl
+# Scale down every day at 10 PM
+scale_down_schedule = "0 22 * * *"
+
+# Scale up every day at 6 AM
+scale_up_schedule = "0 6 * * *"
+```
+
+### Change Scale Size
+
+```hcl
+# Scale up to 10 instances
+mig_scale_up_size = 10
+```
+
+## 🐛 Troubleshooting
+
+### Function not executing
+
+Check Cloud Run invoker permissions:
+```bash
+gcloud run services get-iam-policy mig-scheduler --region=us-central1
+```
+
+### MIG not found
+
+Verify MIG exists and zone is correct:
+```bash
+gcloud compute instance-groups managed list
+```
+
+### Permission denied
+
+Check IAM policies:
+```bash
+gcloud projects get-iam-policy your-project-id \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:mig-scheduler-sa@*"
+```
+
+## 📈 Cost Savings Example
+
+For a 5-instance MIG running weekdays only:
+- **Before**: 5 instances × 24/7 × 4 weeks = 840 instance-hours/month
+- **After**: 5 instances × 120 hours/week × 4 weeks = 600 instance-hours/month  
+- **Savings**: ~29% reduction in compute hours
 
 ## 📝 License
 
-This project is open source and available under the MIT License.
+MIT License - feel free to use this project for your own needs.
 
-## 🔗 Related Resources
+## 🔗 Resources
 
-- [Google Cloud Functions Documentation](https://cloud.google.com/functions/docs)
+- [Cloud Functions Documentation](https://cloud.google.com/functions/docs)
 - [Cloud Scheduler Documentation](https://cloud.google.com/scheduler/docs)
-- [Terraform Google Provider](https://registry.terraform.io/providers/hashicorp/google/latest/docs)
-- [Compute Engine API Reference](https://cloud.google.com/compute/docs/reference/rest/v1/instances)
-
-## ⚠️ Important Notes
-
-1. **Test in non-production first**: Always test in a dev environment before production
-2. **Backup important data**: Ensure critical VMs are backed up
-3. **Review schedules**: Double-check timezones and cron expressions
-4. **Cost monitoring**: Monitor your GCP billing to verify savings
-5. **Persistent disks**: Standard persistent disks continue to incur charges when VMs are stopped
-
-## 📧 Support
-
-For issues and questions:
-- Open an issue in the repository
-- Check Cloud Function logs for detailed error messages
-- Review GCP documentation for API-specific issues
+- [Terraform GCP Provider](https://registry.terraform.io/providers/hashicorp/google/latest/docs)
+- [MIG Documentation](https://cloud.google.com/compute/docs/instance-groups)
