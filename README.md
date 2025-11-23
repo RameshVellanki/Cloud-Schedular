@@ -148,99 +148,61 @@ resource "google_compute_instance" "example" {
 
 ### Step 3: Set Up GitHub Actions (Recommended)
 
-#### 3.1 Enable Required APIs
+#### 3.1 Create Service Account Key
+
+If you don't already have a service account key for your GCP Terraform integration SA:
 
 ```bash
 export PROJECT_ID="your-gcp-project-id"
+export SA_NAME="your-terraform-sa-name"
 
-gcloud services enable \
-  iamcredentials.googleapis.com \
-  sts.googleapis.com \
-  cloudresourcemanager.googleapis.com \
-  storage.googleapis.com \
-  --project="${PROJECT_ID}"
+# Create key and download as JSON
+gcloud iam service-accounts keys create terraform-sa-key.json \
+  --iam-account=${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com
 ```
 
-#### 3.2 Get Project Number
-
-```bash
-export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} \
-  --format='value(projectNumber)')
-echo "Project Number: ${PROJECT_NUMBER}"
-```
-
-#### 3.3 Create Workload Identity Pool
-
-```bash
-gcloud iam workload-identity-pools create "github-pool" \
-  --project="${PROJECT_ID}" \
-  --location="global" \
-  --display-name="GitHub Actions Pool"
-```
-
-#### 3.4 Create Workload Identity Provider
-
-```bash
-gcloud iam workload-identity-pools providers create-oidc "github-provider" \
-  --project="${PROJECT_ID}" \
-  --location="global" \
-  --workload-identity-pool="github-pool" \
-  --display-name="GitHub Provider" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
-  --issuer-uri="https://token.actions.githubusercontent.com"
-```
-
-#### 3.5 Create Service Account
-
-```bash
-gcloud iam service-accounts create github-actions \
-  --project="${PROJECT_ID}" \
-  --display-name="GitHub Actions Deployment"
-
-# Grant necessary permissions
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member="serviceAccount:github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/editor"
-```
-
-#### 3.6 Allow GitHub to Impersonate Service Account
-
-Replace with your GitHub username and repo name:
-
-```bash
-export GITHUB_REPO="YOUR_GITHUB_USERNAME/Cloud-Schedular"
-
-gcloud iam service-accounts add-iam-policy-binding \
-  "github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --project="${PROJECT_ID}" \
-  --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/${GITHUB_REPO}"
-```
-
-#### 3.7 Get Workload Identity Provider Name
-
-```bash
-gcloud iam workload-identity-pools providers describe "github-provider" \
-  --project="${PROJECT_ID}" \
-  --location="global" \
-  --workload-identity-pool="github-pool" \
-  --format="value(name)"
-```
-
-Copy the output (looks like: `projects/123456789/locations/global/workloadIdentityPools/github-pool/providers/github-provider`)
-
-#### 3.8 Configure GitHub Secrets
+#### 3.2 Configure GitHub Secret
 
 1. Go to your GitHub repository
 2. Navigate to: **Settings** → **Secrets and variables** → **Actions**
-3. Add these secrets:
+3. Click **New repository secret**
+4. Add the secret:
 
 | Secret Name | Value |
 |-------------|-------|
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Output from step 3.7 |
-| `GCP_SERVICE_ACCOUNT` | `github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com` |
+| `GCP_SA_KEY` | Entire contents of the service account JSON key file |
 
-#### 3.9 Deploy
+**To get the JSON content:**
+```bash
+# Copy the entire output
+cat terraform-sa-key.json
+
+# Or on Windows
+Get-Content terraform-sa-key.json
+```
+
+**Important**: Delete the local key file after adding to GitHub:
+```bash
+rm terraform-sa-key.json  # Linux/Mac
+Remove-Item terraform-sa-key.json  # Windows
+```
+
+#### 3.3 Verify Service Account Permissions
+
+Ensure your service account has the required roles:
+```bash
+# Check current roles
+gcloud projects get-iam-policy ${PROJECT_ID} \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:serviceAccount:${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Add required roles if needed
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member="serviceAccount:${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/editor"
+```
+
+#### 3.4 Deploy
 
 ```bash
 git add .
@@ -555,9 +517,9 @@ SCALE_UP_ACTION=START                # START or RESUME
 
 GitHub Actions (CI/CD)
   │
-  └─> Workload Identity Federation (No Keys!)
+  └─> Service Account Key (GCP_SA_KEY secret)
         │
-        └─> github-actions@PROJECT.iam.gserviceaccount.com
+        └─> terraform-sa@PROJECT.iam.gserviceaccount.com
               │
               └─> roles/editor (Deploy Infrastructure)
 
@@ -578,11 +540,12 @@ Cloud Function
 ```
 
 **Security Best Practices**:
-- ✅ Workload Identity Federation (no service account keys)
+- ✅ Service account key stored as GitHub secret
 - ✅ Least privilege IAM roles
 - ✅ Versioned state with audit logs
 - ✅ Automated deployments from GitHub only
 - ✅ No secrets in code or version control
+- ⚠️ Rotate service account keys regularly
 
 ## 📁 Project Structure
 
