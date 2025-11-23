@@ -88,10 +88,10 @@ resource "google_storage_bucket_object" "function_source" {
 }
 
 # Cloud Function for VM scheduling
-resource "google_cloudfunctions2_function" "vm_scheduler" {
-  name        = "vm-scheduler"
+resource "google_cloudfunctions2_function" "mig_scheduler" {
+  name        = "mig-scheduler"
   location    = var.region
-  description = "Automated VM scheduler for scale up/down"
+  description = "Automated MIG scheduler for scale up/down"
 
   build_config {
     runtime     = "python311"

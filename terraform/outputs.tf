@@ -40,5 +40,5 @@ output "scale_up_schedule" {
 
 output "service_account_email" {
   description = "Service account email for the function"
-  value       = google_service_account.vm_scheduler.email
+  value       = google_service_account.mig_scheduler.email
 }
