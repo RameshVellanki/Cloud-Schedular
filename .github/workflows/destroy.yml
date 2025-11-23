@@ -1,0 +1,101 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "destroy" to confirm destruction'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+jobs:
+  validate-destroy:
+    runs-on: ubuntu-latest
+    outputs:
+      should_destroy: ${{ steps.check.outputs.should_destroy }}
+    steps:
+      - name: Validate confirmation
+        id: check
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" = "destroy" ]; then
+            echo "should_destroy=true" >> $GITHUB_OUTPUT
+            echo "✅ Confirmation validated"
+          else
+            echo "should_destroy=false" >> $GITHUB_OUTPUT
+            echo "❌ Confirmation failed - you must type 'destroy' to proceed"
+            exit 1
+          fi
+
+  destroy:
+    needs: validate-destroy
+    if: needs.validate-destroy.outputs.should_destroy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Terraform Init
+        working-directory: ./Cloud-Schedular/terraform
+        run: terraform init
+
+      - name: Terraform Plan Destroy
+        working-directory: ./Cloud-Schedular/terraform
+        run: |
+          echo "📋 Planning destruction..."
+          terraform plan -destroy -out=destroy.tfplan
+          terraform show -no-color destroy.tfplan
+
+      - name: Wait for final confirmation
+        run: |
+          echo "⚠️  WARNING: About to destroy all resources in ${{ github.event.inputs.environment }}"
+          echo "Waiting 10 seconds for manual cancellation if needed..."
+          sleep 10
+
+      - name: Terraform Destroy
+        working-directory: ./Cloud-Schedular/terraform
+        run: |
+          echo "🗑️  Destroying infrastructure..."
+          terraform apply -auto-approve destroy.tfplan
+          echo "✅ Infrastructure destroyed successfully"
+
+      - name: Cleanup State (Optional)
+        working-directory: ./Cloud-Schedular/terraform
+        run: |
+          echo "🧹 Cleaning up state files..."
+          rm -f destroy.tfplan
+          echo "✅ Cleanup complete"
+
+      - name: Summary
+        run: |
+          echo "## 🗑️ Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Destroyed by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All Terraform-managed resources have been destroyed." >> $GITHUB_STEP_SUMMARY
